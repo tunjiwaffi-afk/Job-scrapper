@@ -1,0 +1,37 @@
+name: Daily Job Scraper
+
+on:
+  schedule:
+    # Runs at 8:00 AM UTC every day. Adjust the hour for your timezone
+    # (e.g. for 8am Eastern/EDT use '0 12 * * *', for 8am Lagos/WAT use '0 7 * * *').
+    - cron: '0 8 * * *'
+  workflow_dispatch: {}   # lets you trigger it manually from the Actions tab to test
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Write Google credentials from secret
+        env:
+          GOOGLE_CREDS_JSON: ${{ secrets.GOOGLE_CREDS_JSON }}
+        run: printf '%s' "$GOOGLE_CREDS_JSON" > service_account.json
+
+      - name: Run scraper
+        env:
+          JOB_SHEET_ID: ${{ secrets.JOB_SHEET_ID }}
+        run: python job_scraper.py
+
+      - name: Clean up credentials file
+        if: always()
+        run: rm -f service_account.json
