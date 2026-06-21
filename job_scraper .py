@@ -27,9 +27,21 @@ SHEET_ID = os.environ.get("JOB_SHEET_ID", "PASTE_YOUR_SHEET_ID_HERE")
 SHEET_TAB = os.environ.get("JOB_SHEET_TAB", "Jobs")
 CREDENTIALS_FILE = os.environ.get("GOOGLE_CREDS_FILE", "service_account.json")
 
+# Free, no signup needed for Jooble/CareerJet beyond getting a key/affid --
+# see README for the 5-minute signup links. Both gracefully no-op if unset.
+JOOBLE_API_KEY = os.environ.get("JOOBLE_API_KEY", "")
+CAREERJET_API_KEY = os.environ.get("CAREERJET_API_KEY", "")
+
+# Role search terms sent to sources that support keyword search (Jooble,
+# CareerJet, hiring.cafe). Add more phrases here if you want to widen the net.
+SEARCH_TERMS = ["software developer remote", "data engineer remote"]
+
 # Turn sources on/off here.
 SOURCES_ENABLED = {
     "hiringcafe": True,    # experimental, unofficial API -- see fetch_hiringcafe()
+    "jooble": True,        # real public API, needs a free key -- see README
+    "careerjet": False,    # signup blocked -- see fetch_careerjet() for the API itself if revisited later
+    "welcometothejungle": False,  # no verified working credentials yet -- see fetch_welcometothejungle()
     "builtin": False,      # template, no documented public API -- see fetch_builtin()
     "jobright": False,     # not possible -- requires a logged-in account, see fetch_jobright()
     "linkedin": False,     # not possible -- ToS prohibits scraping, see fetch_linkedin()
@@ -47,6 +59,9 @@ USA_REMOTE_ONLY = True
 # (vs. sources that already filter for USA-remote at the API request level).
 NEEDS_TEXT_FILTER = {
     "hiringcafe": False,
+    "jooble": True,
+    "careerjet": True,
+    "welcometothejungle": True,
     "builtin": False,
     "jobright": False,
     "linkedin": False,
@@ -55,8 +70,8 @@ NEEDS_TEXT_FILTER = {
     "simplyhired": False,
 }
 
-# Only keep jobs that look like genuine software developer/engineer roles.
-# Best-effort title matching -- see looks_software_developer() below.
+# Only keep jobs that look like genuine software developer or data engineer
+# roles. Best-effort title matching -- see looks_target_role() below.
 SOFTWARE_DEV_ONLY = True
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -107,7 +122,7 @@ def looks_usa_remote(location_text):
 
 DEV_EXCLUDE_HINTS = [
     "qa", "quality assurance", "test engineer", "sdet",
-    "sales engineer", "support engineer", "data engineer",
+    "sales engineer", "support engineer",
     "data scientist", "machine learning", "devops", "site reliability",
     "security engineer", "network engineer", "hardware engineer",
     "manager", "director", "intern", "internship", "scrum master",
@@ -126,9 +141,127 @@ def looks_software_developer(title):
     return "developer" in text or ("software" in text and "engineer" in text)
 
 
+def looks_data_engineer(title):
+    """Best-effort: True if the title reads as a genuine Data Engineer role."""
+    if not title:
+        return False
+    text = title.lower()
+    if any(h in text for h in DEV_EXCLUDE_HINTS):
+        return False
+    return "data engineer" in text or "data engineering" in text
+
+
+def looks_target_role(title):
+    """True if this is one of the role types we want: software developer
+    OR data engineer."""
+    return looks_software_developer(title) or looks_data_engineer(title)
+
+
 # ============================================================
 # SOURCE FETCHERS — each returns a list of {title, company, link}
 # ============================================================
+
+def fetch_jooble():
+    """
+    Jooble's real, documented public REST API. Free, requires a key --
+    sign up at https://jooble.org/api/about (takes a couple minutes), then
+    add it as the JOOBLE_API_KEY secret. If the key isn't set, this just
+    skips quietly rather than erroring.
+    """
+    jobs = []
+    if not JOOBLE_API_KEY:
+        log.info("jooble: skipped — JOOBLE_API_KEY not set. See README to sign up.")
+        return jobs
+
+    url = f"https://jooble.org/api/{JOOBLE_API_KEY}"
+    for term in SEARCH_TERMS:
+        try:
+            r = requests.post(
+                url,
+                json={"keywords": term, "location": "USA", "page": "1"},
+                timeout=15,
+            )
+            if r.status_code != 200:
+                log.warning(f"jooble: status {r.status_code} for term {term!r}")
+                continue
+            data = r.json()
+            for item in data.get("jobs", []):
+                jobs.append({
+                    "title": (item.get("title") or "").strip(),
+                    "company": (item.get("company") or "").strip(),
+                    "link": (item.get("link") or "").strip(),
+                    "_location": (item.get("location") or "").strip(),
+                })
+        except Exception as e:
+            log.warning(f"jooble fetch failed for term {term!r}: {e}")
+    return jobs
+
+
+def fetch_careerjet():
+    """
+    CareerJet's real, documented public partner API (v4). Free, requires
+    an API key -- sign up for a Publisher account at
+    https://www.careerjet.com/partners/register/as-publisher, then add
+    the key as the CAREERJET_API_KEY secret. Skips quietly if unset.
+    Auth is HTTP Basic: API key as the username, empty password.
+    """
+    jobs = []
+    if not CAREERJET_API_KEY:
+        log.info("careerjet: skipped — CAREERJET_API_KEY not set. See README to sign up.")
+        return jobs
+
+    url = "https://search.api.careerjet.net/v4/query"
+    cj_headers = {"User-Agent": "Mozilla/5.0 (compatible; PersonalJobAggregator/1.0)"}
+    for term in SEARCH_TERMS:
+        try:
+            params = {
+                "keywords": term,
+                "location": "USA",
+                "locale_code": "en_US",
+                "user_ip": "0.0.0.0",
+                "user_agent": cj_headers["User-Agent"],
+                "page_size": "50",
+            }
+            r = requests.get(
+                url, params=params, headers=cj_headers,
+                auth=(CAREERJET_API_KEY, ""), timeout=15,
+            )
+            if r.status_code != 200:
+                log.warning(f"careerjet: status {r.status_code} for term {term!r}")
+                continue
+            data = r.json()
+            for item in data.get("jobs", []):
+                jobs.append({
+                    "title": (item.get("title") or "").strip(),
+                    "company": (item.get("company") or "").strip(),
+                    "link": (item.get("url") or "").strip(),
+                    "_location": (item.get("locations") or "").strip(),
+                })
+        except Exception as e:
+            log.warning(f"careerjet fetch failed for term {term!r}: {e}")
+    return jobs
+
+
+def fetch_welcometothejungle():
+    """
+    NOT IMPLEMENTED YET. Welcome to the Jungle has no official public API.
+    Their on-site search runs through Algolia (the same way most "instant
+    search" boxes work), which would be a legitimate-ish path since it's
+    the literal mechanism their own site uses for anyone searching --
+    but doing that requires the live Algolia app ID and search-only key
+    embedded in their site's frontend code, and I wasn't able to confirm
+    working values for those with the tools available right now (my
+    sandbox can't browse their site directly, and search/fetch tools
+    don't expose embedded JS credentials, only rendered page text).
+    If you ever get access to a computer: open welcometothejungle.com,
+    open DevTools -> Network -> XHR, search for a remote software/data
+    role, and look for a request to an *.algolia.net or algolianet.com
+    domain. Send me the request (it'll show an X-Algolia-API-Key header
+    and an application ID in the URL) and this can be wired up properly.
+    """
+    log.info("welcometothejungle: skipped — no verified working API access yet.")
+    return []
+
 
 def fetch_builtin():
     """
@@ -218,7 +351,7 @@ def fetch_hiringcafe():
         "Origin": "https://hiring.cafe",
     }
 
-    search_state = {
+    base_search_state = {
         "locations": [{
             "formatted_address": "United States",
             "types": ["country"],
@@ -249,7 +382,7 @@ def fetch_hiringcafe():
         "restrictJobsToTransparentSalaries": False,
         "calcFrequency": "Yearly",
         "commitmentTypes": ["Full Time", "Part Time", "Contract", "Internship", "Temporary", "Seasonal", "Volunteer"],
-        "jobTitleQuery": "software developer",
+        "jobTitleQuery": "",
         "jobDescriptionQuery": "",
         "associatesDegreeFieldsOfStudy": [],
         "excludedAssociatesDegreeFieldsOfStudy": [],
@@ -322,36 +455,43 @@ def fetch_hiringcafe():
         "excludedLatestInvestmentSeries": [],
     }
 
-    payload = {"size": 100, "page": 0, "searchState": search_state}
+    for term in SEARCH_TERMS:
+        search_state = dict(base_search_state)
+        search_state["jobTitleQuery"] = term
 
-    try:
-        r = requests.post(jobs_endpoint, json=payload, headers=hc_headers, timeout=20)
-        if r.status_code != 200:
-            log.warning(f"hiring.cafe returned status {r.status_code} (likely blocked or API changed)")
-            return jobs
+        payload = {"size": 100, "page": 0, "searchState": search_state}
 
-        data = r.json()
-        raw_jobs = []
-        if isinstance(data, dict):
-            for key in ("results", "jobs", "data", "items", "content"):
-                if isinstance(data.get(key), list):
-                    raw_jobs = data[key]
-                    break
-            if not raw_jobs and isinstance(data.get("hits"), dict):
-                hits = data["hits"].get("hits", [])
-                raw_jobs = [h.get("_source", h) for h in hits]
-        elif isinstance(data, list):
-            raw_jobs = data
+        try:
+            r = requests.post(jobs_endpoint, json=payload, headers=hc_headers, timeout=20)
+            if r.status_code != 200:
+                log.warning(f"hiring.cafe returned status {r.status_code} for term {term!r} (likely blocked or API changed)")
+                continue
 
-        for item in raw_jobs:
-            mapped = _hc_extract(item)
-            if mapped["link"]:
-                jobs.append(mapped)
+            data = r.json()
+            raw_jobs = []
+            if isinstance(data, dict):
+                for key in ("results", "jobs", "data", "items", "content"):
+                    if isinstance(data.get(key), list):
+                        raw_jobs = data[key]
+                        break
+                if not raw_jobs and isinstance(data.get("hits"), dict):
+                    hits = data["hits"].get("hits", [])
+                    raw_jobs = [h.get("_source", h) for h in hits]
+            elif isinstance(data, list):
+                raw_jobs = data
 
-        if raw_jobs and not jobs:
-            log.warning("hiring.cafe returned data but field mapping found nothing usable -- field names likely need adjusting.")
-    except Exception as e:
-        log.warning(f"hiring.cafe fetch failed: {e}")
+            term_jobs = []
+            for item in raw_jobs:
+                mapped = _hc_extract(item)
+                if mapped["link"]:
+                    term_jobs.append(mapped)
+
+            if raw_jobs and not term_jobs:
+                log.warning("hiring.cafe returned data but field mapping found nothing usable -- field names likely need adjusting.")
+            jobs.extend(term_jobs)
+        except Exception as e:
+            log.warning(f"hiring.cafe fetch failed for term {term!r}: {e}")
+
     return jobs
 
 
@@ -416,6 +556,9 @@ def fetch_simplyhired():
 
 SOURCE_FUNCS = {
     "hiringcafe": fetch_hiringcafe,
+    "jooble": fetch_jooble,
+    "careerjet": fetch_careerjet,
+    "welcometothejungle": fetch_welcometothejungle,
     "builtin": fetch_builtin,
     "jobright": fetch_jobright,
     "linkedin": fetch_linkedin,
@@ -492,7 +635,7 @@ def main():
     log.info(f"Total jobs collected: {len(all_jobs)}")
 
     if SOFTWARE_DEV_ONLY:
-        all_jobs = [j for j in all_jobs if looks_software_developer(j.get("title", ""))]
+        all_jobs = [j for j in all_jobs if looks_target_role(j.get("title", ""))]
         log.info(f"Total jobs after software-developer filter: {len(all_jobs)}")
 
     if SHEET_ID == "PASTE_YOUR_SHEET_ID_HERE":
