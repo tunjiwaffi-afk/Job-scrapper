@@ -23,11 +23,15 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Write Google credentials from secret
-        run: echo "${{ secrets.GOOGLE_CREDS_JSON }}" > service_account.json
+        env:
+          GOOGLE_CREDS_JSON: ${{ secrets.GOOGLE_CREDS_JSON }}
+        run: printf '%s' "$GOOGLE_CREDS_JSON" > service_account.json
 
       - name: Run scraper
         env:
           JOB_SHEET_ID: ${{ secrets.JOB_SHEET_ID }}
+          JOOBLE_API_KEY: ${{ secrets.JOOBLE_API_KEY }}
+          CAREERJET_API_KEY: ${{ secrets.CAREERJET_API_KEY }}
         run: python job_scraper.py
 
       - name: Clean up credentials file
